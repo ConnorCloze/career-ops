@@ -14,8 +14,41 @@
 //     <centerText class="column" data-label="Location">{Location}</centerText>
 //   </a>
 
+// CORRECTION 2026-09-18: most Qualia listings DO sit on a public Greenhouse
+// board (boards-api.greenhouse.io/v1/boards/qualia, 20 of the page's 29
+// titles). The page stays the listing source because it is the superset, but
+// a listing that title-matches the board is emitted with its Greenhouse URL:
+// downstream JD fetchers speak Greenhouse and cannot read qualia.com, so a
+// qualia.com URL parked every hit with no job description. Best-effort: a
+// board fetch failure or a title with no match keeps the qualia.com URL.
+
 const BASE_URL = 'https://www.qualia.com';
 const JOBS_PATH = '/jobs/';
+const GREENHOUSE_BOARD = 'https://boards-api.greenhouse.io/v1/boards/qualia/jobs';
+
+const decode = s => s.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+const titleKey = s => decode(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// title key -> Greenhouse URL, only for titles that are UNIQUE on the board
+// (one title in several cities must not collapse onto the first city's req).
+async function greenhouseUrls() {
+  try {
+    const res = await fetch(GREENHOUSE_BOARD, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const counts = new Map();
+    const urls = new Map();
+    for (const j of (await res.json()).jobs || []) {
+      const k = titleKey(j.title || '');
+      counts.set(k, (counts.get(k) || 0) + 1);
+      urls.set(k, j.absolute_url);
+    }
+    for (const [k, n] of counts) if (n > 1) urls.delete(k);
+    return urls;
+  } catch (err) {
+    console.error(`Qualia: Greenhouse board lookup skipped (${err.message}); keeping qualia.com URLs`);
+    return new Map();
+  }
+}
 
 async function main() {
   const res = await fetch(`${BASE_URL}${JOBS_PATH}`, {
@@ -26,6 +59,7 @@ async function main() {
   }
   const html = await res.text();
 
+  const ghUrls = await greenhouseUrls();
   const jobs = [];
   const rowRe = /<a href="(\/jobs\/[^"]+)" class="row">([\s\S]*?)<\/a>/g;
   let match;
@@ -37,8 +71,8 @@ async function main() {
     const location = locationMatch ? locationMatch[1].trim() : '';
     if (!title) continue;
     jobs.push({
-      title,
-      url: `${BASE_URL}${href}`,
+      title: decode(title),
+      url: ghUrls.get(titleKey(title)) || `${BASE_URL}${href}`,
       location,
       company: 'Qualia',
     });
